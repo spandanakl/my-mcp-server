@@ -1,4 +1,4 @@
-import express from "express";
+import express, { Request, Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import dotenv from "dotenv";
@@ -11,27 +11,65 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Health check route — Render.com uses this to know your server is alive
-app.get("/", (req, res) => {
+// Store transports by session
+const transports = new Map<string, SSEServerTransport>();
+
+// Health check
+app.get("/", (req: Request, res: Response) => {
   res.send("Pharma R&D MCP Server is running! Tools: calculate_drug_dosage, check_excipient_compatibility, estimate_shelf_life, classify_adverse_event");
 });
 
-// MCP SSE endpoint — this is what ChatGPT connects to
-app.get("/sse", async (req, res) => {
-  const server = new McpServer({
-    name: "my-mcp-server",
-    version: "1.0.0",
-  });
+// SSE endpoint — client connects here first
+app.get("/sse", async (req: Request, res: Response) => {
+  try {
+    const server = new McpServer({
+      name: "pharma-rd-mcp-server",
+      version: "1.0.0",
+    });
 
-  registerTools(server);
+    registerTools(server);
 
-  const transport = new SSEServerTransport("/messages", res);
-  await server.connect(transport);
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = transport.sessionId;
+    transports.set(sessionId, transport);
+
+    transport.onclose = () => {
+      transports.delete(sessionId);
+    };
+
+    await server.connect(transport);
+  } catch (error) {
+    console.error("SSE connection error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to establish SSE connection" });
+    }
+  }
 });
 
-// MCP message endpoint — ChatGPT sends tool calls here
-app.post("/messages", async (req, res) => {
-  res.status(200).json({ status: "ok" });
+// Messages endpoint — client sends tool calls here
+app.post("/messages", async (req: Request, res: Response) => {
+  try {
+    const sessionId = req.query.sessionId as string;
+
+    if (!sessionId) {
+      res.status(400).json({ error: "Missing sessionId" });
+      return;
+    }
+
+    const transport = transports.get(sessionId);
+
+    if (!transport) {
+      res.status(404).json({ error: "Session not found" });
+      return;
+    }
+
+    await transport.handlePostMessage(req, res);
+  } catch (error) {
+    console.error("Message handling error:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to handle message" });
+    }
+  }
 });
 
 app.listen(PORT, () => {
