@@ -9,97 +9,59 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// IMPORTANT — raw body needed before json parser for SSE post messages
-app.use((req, res, next) => {
-  if (req.path === "/messages") {
-    next();
-  } else {
-    express.json()(req, res, next);
-  }
-});
+app.use(express.json());
 
-// Store active servers and transports by session ID
-const sessions = new Map<string, {
-  server: McpServer;
-  transport: SSEServerTransport;
-}>();
+// Store active transports by session ID
+const transports = new Map<string, SSEServerTransport>();
 
 // Health check
 app.get("/", (req: Request, res: Response) => {
   res.send("Pharma R&D MCP Server is running! Tools: calculate_drug_dosage, check_excipient_compatibility, estimate_shelf_life, classify_adverse_event");
 });
 
-// SSE endpoint — Inspector connects here first
+// SSE endpoint — let the SDK handle headers entirely
 app.get("/sse", async (req: Request, res: Response) => {
-  console.log("New SSE connection request");
+  console.log("New SSE connection");
 
-  // Set SSE headers manually
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.flushHeaders();
+  const transport = new SSEServerTransport("/messages", res);
+  const sessionId = transport.sessionId;
+  transports.set(sessionId, transport);
 
-  try {
-    const server = new McpServer({
-      name: "pharma-rd-mcp-server",
-      version: "1.0.0",
-    });
+  console.log(`Session created: ${sessionId}`);
 
-    registerTools(server);
+  req.on("close", () => {
+    console.log(`Session closed: ${sessionId}`);
+    transports.delete(sessionId);
+  });
 
-    const transport = new SSEServerTransport("/messages", res);
-    const sessionId = transport.sessionId;
+  const server = new McpServer({
+    name: "pharma-rd-mcp-server",
+    version: "1.0.0",
+  });
 
-    console.log(`Session created: ${sessionId}`);
+  registerTools(server);
 
-    sessions.set(sessionId, { server, transport });
-
-    req.on("close", () => {
-      console.log(`Session closed: ${sessionId}`);
-      sessions.delete(sessionId);
-    });
-
-    await server.connect(transport);
-  } catch (error) {
-    console.error("SSE error:", error);
-  }
+  await server.connect(transport);
 });
 
-// Messages endpoint — Inspector sends tool calls here
+// Messages endpoint
 app.post("/messages", async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
-  console.log(`Incoming message for session: ${sessionId}`);
+  console.log(`Message for session: ${sessionId}`);
 
   if (!sessionId) {
     res.status(400).json({ error: "Missing sessionId" });
     return;
   }
 
-  const session = sessions.get(sessionId);
+  const transport = transports.get(sessionId);
 
-  if (!session) {
-    console.error(`Session not found: ${sessionId}`);
-    res.status(404).json({ error: "Session not found. Please reconnect." });
+  if (!transport) {
+    res.status(404).json({ error: "Session not found" });
     return;
   }
 
-  try {
-    await session.transport.handlePostMessage(req, res);
-  } catch (error) {
-    console.error("Error handling message:", error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: "Failed to handle message" });
-    }
-  }
-});
-
-// CORS preflight
-app.options("*", (req: Request, res: Response) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.status(200).end();
+  await transport.handlePostMessage(req, res);
 });
 
 app.listen(PORT, () => {
