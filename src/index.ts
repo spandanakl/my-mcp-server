@@ -9,17 +9,15 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-
 // Store active transports by session ID
 const transports = new Map<string, SSEServerTransport>();
 
-// Health check
+// Health check — no middleware needed
 app.get("/", (req: Request, res: Response) => {
   res.send("Pharma R&D MCP Server is running! Tools: calculate_drug_dosage, check_excipient_compatibility, estimate_shelf_life, classify_adverse_event");
 });
 
-// SSE endpoint — let the SDK handle headers entirely
+// SSE endpoint
 app.get("/sse", async (req: Request, res: Response) => {
   console.log("New SSE connection");
 
@@ -44,7 +42,7 @@ app.get("/sse", async (req: Request, res: Response) => {
   await server.connect(transport);
 });
 
-// Messages endpoint
+// Messages endpoint — NO json middleware here, let SDK handle raw body
 app.post("/messages", async (req: Request, res: Response) => {
   const sessionId = req.query.sessionId as string;
   console.log(`Message for session: ${sessionId}`);
@@ -57,6 +55,7 @@ app.post("/messages", async (req: Request, res: Response) => {
   const transport = transports.get(sessionId);
 
   if (!transport) {
+    console.error(`Session not found: ${sessionId}`);
     res.status(404).json({ error: "Session not found" });
     return;
   }
